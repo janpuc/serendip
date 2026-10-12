@@ -13,13 +13,24 @@ from serendip.db import Database, stamp
 
 async def test_migrations_are_idempotent(tmp_path):
     path = str(tmp_path / "m.db")
-    assert migrate.migrate(path) == ["001_observe.sql"]
+    assert migrate.migrate(path) == ["001_observe.sql", "002_discover.sql"]
     assert migrate.migrate(path) == []
     conn = sqlite3.connect(path)
     tables = {r[0] for r in conn.execute("select name from sqlite_master where type = 'table'")}
     assert {"users", "events", "subscriptions", "opens", "schema_version"} <= tables
+    assert {
+        "videos",
+        "pool",
+        "lists",
+        "impressions",
+        "exposures",
+        "followups",
+        "feed_runs",
+        "breaker",
+    } <= tables
     assert conn.execute("select version, name from schema_version").fetchall() == [
-        (1, "001_observe.sql")
+        (1, "001_observe.sql"),
+        (2, "002_discover.sql"),
     ]
     assert conn.execute("pragma journal_mode").fetchone() == ("wal",)
     conn.close()
@@ -65,7 +76,9 @@ def test_cli_migrate(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("SERENDIP_DB_PATH", str(tmp_path / "c.db"))
     monkeypatch.chdir(tmp_path)
     assert cli.main(["migrate"]) == 0
-    assert "applied 001_observe.sql" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "applied 001_observe.sql" in out
+    assert "applied 002_discover.sql" in out
 
 
 def test_device_map():

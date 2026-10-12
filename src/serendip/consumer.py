@@ -51,6 +51,12 @@ async def process(state: State, item: IngestItem) -> None:
     ts = stamp(item.received_at)
     device = state.settings.device_for(item.user_agent)
     await _store(state, event, verdict.name, device, ts)
+    if event.kind == OPEN and state.followups is not None:
+        assert event.video_id is not None
+        try:
+            await state.followups.trigger(verdict.name, event.video_id, item.received_at)
+        except Exception as exc:
+            log.warning("followup_trigger_failed", error=type(exc).__name__)
     # Events finish out of order; /status must not move backwards.
     if state.last_event_at is None or ts > state.last_event_at:
         state.last_event_at = ts

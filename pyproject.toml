@@ -11,6 +11,7 @@ dependencies = [
   "pydantic-settings>=2.6",
   "structlog>=24.4",
   "prometheus-client>=0.21",
+  "tzdata>=2026.5",
 ]
 
 [project.optional-dependencies]
@@ -36,3 +37,4 @@ ignore = ["E501"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = ["benchmark: timing checks on this machine; quick, part of the normal run"]

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 
 from fastapi import FastAPI, Request, Response
 
@@ -44,7 +43,7 @@ def create_ingest_app(state: State) -> FastAPI:
             authorization=request.headers.get("authorization"),
             user_agent=request.headers.get("user-agent", ""),
             body=body,
-            received_at=datetime.now(UTC),
+            received_at=state.clock.now(),
         )
         try:
             state.queue.put_nowait(item)

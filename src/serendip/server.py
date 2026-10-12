@@ -15,8 +15,11 @@ from .api import create_api_app
 from .auth import Authenticator
 from .config import Settings
 from .db import Database
+from .feed import FeedJob
+from .followups import Followups
 from .ingest import create_ingest_app
 from .state import State
+from .upstream import ServerClient
 
 log = structlog.get_logger()
 
@@ -80,11 +83,27 @@ def supervise(task: asyncio.Task, state: State, stop: Callable[[], None]) -> Non
     task.add_done_callback(ended)
 
 
+def _start_jobs(state: State) -> ServerClient | None:
+    """The feed job and the follow-ups need serendip's own Yattee Server user. Without one they
+    are off, and /popular still serves from the pool."""
+    settings = state.settings
+    if not settings.service_user_configured:
+        log.warning("background_jobs_disabled", reason="no service user configured")
+        return None
+    client = ServerClient(settings, state.breaker, state.clock)
+    state.feed = FeedJob(settings, state.db, state.breaker, state.clock, client)
+    if settings.related_source == "followup":
+        state.followups = Followups(settings, state.db, state.breaker, state.clock, client)
+    return client
+
+
 async def serve(settings: Settings) -> int:
     """Runs until stopped; returns the process exit code."""
     db = await Database.connect(settings.db_path)
     auth = Authenticator(settings)
     state = State(settings, db, auth, asyncio.Queue(maxsize=settings.ingest_queue_max))
+    await state.breaker.initialise(settings.breaker_start_open)
+    client = _start_jobs(state)
 
     ingest = _server(
         create_ingest_app(state), settings.ingest_port, limit_concurrency=INGEST_MAX_CONNECTIONS
@@ -104,13 +123,20 @@ async def serve(settings: Settings) -> int:
 
     async def retention() -> None:
         deleted = await db.apply_retention()
-        log.info("retention", events_deleted=deleted)
+        discover = await db.apply_discover_retention(state.clock.now())
+        log.info(
+            "retention", events_deleted=deleted, **{f"{k}_deleted": v for k, v in discover.items()}
+        )
 
     background = [
         asyncio.create_task(consumer.run(state), name="consumer"),
         asyncio.create_task(_every(CHECKPOINT_EVERY_S, db.checkpoint), name="checkpoint"),
         asyncio.create_task(_every(RETENTION_EVERY_S, retention, first_run=True), name="retention"),
     ]
+    if state.followups is not None:
+        background.append(asyncio.create_task(state.followups.run(), name="followups"))
+    if state.feed is not None:
+        background.append(asyncio.create_task(state.feed.run(), name="feed"))
     # A server that ends on its own (it cannot bind its port, say) stops the other one too.
     servers = [
         asyncio.create_task(ingest.serve(), name="ingest_server"),
@@ -118,7 +144,14 @@ async def serve(settings: Settings) -> int:
     ]
     for task in background + servers:
         supervise(task, state, stop)
-    log.info("serving", api_port=settings.api_port, ingest_port=settings.ingest_port)
+    breaker = await state.breaker.state()
+    log.info(
+        "serving",
+        breaker_open=breaker.open,
+        related_source=settings.related_source,
+        api_port=settings.api_port,
+        ingest_port=settings.ingest_port,
+    )
     try:
         await asyncio.gather(*servers, return_exceptions=True)
     finally:
@@ -126,6 +159,8 @@ async def serve(settings: Settings) -> int:
         for task in background:
             task.cancel()
         await asyncio.gather(*background, return_exceptions=True)
+        if client is not None:
+            await client.close()
         await db.checkpoint()
         await db.close()
     return 0 if state.healthy else 1
