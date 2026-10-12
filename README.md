@@ -8,4 +8,5 @@ transparent proxy. It learns from your subscriptions and what you watch, then an
 your channels, related videos, channels you don't follow yet. No Google account, no YouTube
 algorithm.
 
-Status: not built yet. The design brief is in [`docs/BRIEF.md`](docs/BRIEF.md).
+Status: stage (a), observe-only ingest and SQLite storage, is built; no discover feed yet.
+The brief is in [`docs/BRIEF.md`](docs/BRIEF.md), the design in [`docs/DESIGN.md`](docs/DESIGN.md).

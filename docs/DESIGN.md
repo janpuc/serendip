@@ -48,7 +48,7 @@ Yattee app ──► Envoy (yattee.janpuc.com) ──► yattee-server:8085     
                     ├─ RequestMirror ───────► serendip:8081 (ingest)     (record, reply 204)
                     └─ GET /api/v1/popular ─► serendip:8080 (api)        (stage b)
 
-serendip worker ──► yattee-server:8085 in-cluster, own user: /api/user/me, POST /api/v1/feed
+serendip worker ──► yattee-server:8085 in-cluster, own user: POST /api/v1/feed (stage b)
                 └─► www.youtube.com/youtubei/v1/next   (anonymous, budgeted)
 ```
 
@@ -90,23 +90,24 @@ missing and the design is reconsidered with Jan; there is no silent inline fallb
 
 ### 3.1 Authentication
 
-- serendip has no password hashes. It validates `Authorization: Basic` by calling
-  `GET /api/user/me` on Yattee Server with that header (no upstream cost;
-  `routers/admin/users.py:119-140`). It keys users by the returned **user id**, not the
-  submitted name.
-- Verdicts live in a bounded in-memory cache for 10 minutes, keyed by a hash of the header;
-  nothing about the header is persisted or logged. A revoked password keeps working against
-  serendip for up to 10 minutes.
-- Concurrent checks for the same header are coalesced. Unknown headers are rate-limited inside
-  serendip *before* any check is forwarded, because the server's own limiter counts failures
-  per peer IP before validating (`basic_auth.py:170-182`) and would otherwise lock out
-  serendip's checks. A server 429 or outage is "unknown", not "invalid".
+- **serendip checks credentials locally and never forwards them.** `SERENDIP_USERS` lists
+  `name=<sha256>` entries, the SHA-256 of each user's full `Authorization` header. The
+  ExternalSecret derives it from the same 1Password item that provisions the server's user, so
+  a password change updates both. The server has one user today (`janpuc`).
+- Why not ask the server: its limiter allows 5 failed logins per peer IP per minute and
+  applies it before validating, even to valid credentials (`settings.py:131-132`,
+  `basic_auth.py:168-182`). Any failing check serendip forwarded, from an attacker, a stale
+  password, a retry after a timeout or a restart, would bring serendip's own checks closer to
+  a 429. Two review rounds found new ways to reach it; a local check has none.
+- A header that is not on the list, or is malformed, drops the event. A new Yattee user is not
+  recognised until added to the list.
 - `/api/v1/popular` without a valid header gets 401 with `WWW-Authenticate`, as the server
   sends. Mirrored requests whose header does not validate are dropped.
 - serendip's own background calls use a separate Yattee Server user (`serendip`, created by
   Jan) whose credentials come from 1Password through an ExternalSecret.
-- `Authorization` headers and signed query strings are redacted everywhere, including stored
-  JSON. serendip never fetches a URL taken from a mirrored request.
+- `Authorization` headers and signed query strings are redacted everywhere: logs, object
+  representations, and every stored free-text value (search terms, channel names), which are
+  sanitised at ingest. serendip never fetches a URL taken from a mirrored request.
 - Popular responses carry `Cache-Control: private, no-store`.
 
 ## 4. Signals (v1)
@@ -240,7 +241,7 @@ the heuristic as fallback.
 
 | Table | Columns |
 |---|---|
-| `users` | id (server user id), name, first_seen |
+| `users` | id (internal), name (from `SERENDIP_USERS`, unique), first_seen |
 | `events` | id, user_id, ts_utc, device, kind, video_id, query |
 | `subscriptions` | user_id, channel_id, name, first_seen, last_seen_by_user |
 | `opens` | user_id, video_id, channel_id, last_open_utc, count (unique user_id + video_id) |
@@ -262,7 +263,7 @@ WAL every few minutes so a snapshot is consistent enough to restore.
 | serendip down | Popular fails; the pinned section keeps its cached list, the browse view shows an error | nothing else is affected |
 | Pool empty or worker failing | | serve from the stored pool with the same filters; if nothing qualifies, return an empty list. Never a request-time call to YouTube or to the server's `/popular` |
 | Bot check | `/next` stops | breaker, manual re-enable; pool and `subs` keep serving |
-| Yattee Server down | auth checks fail | cached verdicts serve for up to 10 minutes; the app cannot play anyway |
+| Yattee Server down | `subs` cannot refresh | the stored pool keeps serving; auth is local, so `/popular` still answers |
 | `/next` layout change | parser yields nothing | breaker on missing `contents`; metric on empty lists; re-sync the vendored parser |
 | Mirror lost or delayed | an open is missed | accepted (best effort) |
 | Bad item | the app rejects the whole list | validation drops the item before sending |
@@ -273,8 +274,9 @@ WAL every few minutes so a snapshot is consistent enough to restore.
   serendip as mirror: `POST` body arrives intact, path and query unchanged, `Host` as sent,
   primary latency unaffected with serendip slow, stopped, or returning errors.
 - **Unit**: event extraction from recorded requests (from real server log lines); subscription
-  union and ageing with partial and chunked posts; auth cache, coalescing, pre-forward rate
-  limit, 429/outage handling; redaction; budget and breaker transitions; vendored parser
+  union and ageing with partial and chunked posts; local allowlist (known, unknown and
+  malformed credentials, and no outgoing request in any case); redaction; budget and breaker
+  transitions; vendored parser
   against upstream's tests plus recorded real `/next` responses; response validation.
 - **Selection**: deterministic under a seed and snapshot; never returns opened (90 days) or
   recently shown items; caps and the subscription share hold during the draw; shortage returns
@@ -289,8 +291,8 @@ WAL every few minutes so a snapshot is consistent enough to restore.
 ## 12. Stages
 
 - **(a) Observe**: service skeleton, both ports, mirror ingestion, auth check, SQLite,
-  subscriptions union, opens, metrics, `/status`, the local mirror spike. **No YouTube calls
-  (the only outgoing call is `/api/user/me` to the server) and no change to Popular.** Home-ops branch: serendip release, ExternalSecret, PVC,
+  subscriptions union, opens, metrics, `/status`, the local mirror spike. **No outgoing calls
+  at all and no change to Popular.** Home-ops branch: serendip release, ExternalSecret, PVC,
   ServiceMonitor, and the mirror rules on the yattee-server route.
 - **(b) Discover**: `/next` client with budget and breaker, pool builder, selection, `/popular`
   route to serendip.
