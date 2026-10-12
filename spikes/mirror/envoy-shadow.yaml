@@ -1,0 +1,71 @@
+# Control copy of envoy.yaml with disable_shadow_host_suffix_append omitted, i.e. the
+# Envoy default where a "-shadow" suffix is appended to the Host header of mirrored
+# requests. Used only for measurement 3 (Host header seen by the mirror). Served on the
+# host port 10001.
+node:
+  id: serendip-mirror-spike-shadow
+  cluster: serendip-mirror-spike-shadow
+
+admin:
+  address:
+    socket_address: { address: 0.0.0.0, port_value: 9901 }
+
+static_resources:
+  listeners:
+  - name: ingress
+    address:
+      socket_address: { address: 0.0.0.0, port_value: 10000 }
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: ingress_http
+          codec_type: AUTO
+          access_log:
+          - name: envoy.access_loggers.stdout
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+          route_config:
+            name: local_route
+            virtual_hosts:
+            - name: yattee
+              domains: ["*"]
+              routes:
+              - match:
+                  prefix: "/"
+                route:
+                  cluster: primary
+                  timeout: 30s
+                  request_mirror_policies:
+                  - cluster: mirror
+                    runtime_fraction:
+                      default_value:
+                        numerator: 100
+                        denominator: HUNDRED
+          http_filters:
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+  - name: primary
+    type: STRICT_DNS
+    connect_timeout: 1s
+    load_assignment:
+      cluster_name: primary
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address: { address: primary, port_value: 8080 }
+  - name: mirror
+    type: STRICT_DNS
+    connect_timeout: 1s
+    load_assignment:
+      cluster_name: mirror
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address: { address: mirror, port_value: 8080 }

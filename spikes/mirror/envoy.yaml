@@ -1,0 +1,78 @@
+# Static Envoy bootstrap for the serendip mirror spike (docs/DESIGN.md sections 3 and 11).
+#
+# This mirrors the shape Envoy Gateway v1.9.2 produces for an HTTPRoute RequestMirror
+# filter: a route-level request_mirror_policies entry on the primary route, with
+# disable_shadow_host_suffix_append: true. See buildXdsRequestMirrorPolicies in
+# internal/xds/translator/route.go at tag v1.9.2 (quoted in route-go-v1.9.2-excerpt.txt
+# next to this file).
+#
+# envoy-shadow.yaml is identical except that disable_shadow_host_suffix_append is absent,
+# so the two listeners can be compared directly (measurement 3).
+node:
+  id: serendip-mirror-spike
+  cluster: serendip-mirror-spike
+
+admin:
+  address:
+    socket_address: { address: 0.0.0.0, port_value: 9901 }
+
+static_resources:
+  listeners:
+  - name: ingress
+    address:
+      socket_address: { address: 0.0.0.0, port_value: 10000 }
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: ingress_http
+          codec_type: AUTO
+          access_log:
+          - name: envoy.access_loggers.stdout
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+          route_config:
+            name: local_route
+            virtual_hosts:
+            - name: yattee
+              domains: ["*"]
+              routes:
+              - match:
+                  prefix: "/"
+                route:
+                  cluster: primary
+                  timeout: 30s
+                  request_mirror_policies:
+                  - cluster: mirror
+                    runtime_fraction:
+                      default_value:
+                        numerator: 100
+                        denominator: HUNDRED
+                    disable_shadow_host_suffix_append: true
+          http_filters:
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+  - name: primary
+    type: STRICT_DNS
+    connect_timeout: 1s
+    load_assignment:
+      cluster_name: primary
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address: { address: primary, port_value: 8080 }
+  - name: mirror
+    type: STRICT_DNS
+    connect_timeout: 1s
+    load_assignment:
+      cluster_name: mirror
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address: { address: mirror, port_value: 8080 }

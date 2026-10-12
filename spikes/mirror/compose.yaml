@@ -1,0 +1,64 @@
+name: serendip-mirror-spike
+
+# Local spike for docs/DESIGN.md sections 3 (Mirror contract) and 11 (Mirror spike).
+# Run everything with `python3 -I run.py` from this directory; run.py starts and stops
+# this stack itself and leaves it down when it finishes.
+#
+#   primary       fake Yattee Server origin, 200 + JSON, configurable latency
+#   mirror        fake serendip ingest port, records every request to out/mirror.jsonl,
+#                 replies 204 (modes: normal, slow, 500; or stopped as a container)
+#   envoy         Envoy v1.39.3 with disable_shadow_host_suffix_append: true (port 10000)
+#   envoy-shadow  same route without that flag, i.e. the Envoy default (port 10001)
+
+services:
+  primary:
+    image: python:3.12-slim
+    command: ["python3", "-I", "/app/primary.py"]
+    environment:
+      PRIMARY_PORT: "8080"
+      PRIMARY_LATENCY_MS: "0"
+      PRIMARY_LATENCY_FILE: /app/out/primary_latency_ms.txt
+    volumes:
+      - ./:/app
+    ports:
+      - "127.0.0.1:18080:8080"
+    depends_on:
+      - mirror
+
+  mirror:
+    image: python:3.12-slim
+    command: ["python3", "-I", "/app/mirror.py"]
+    environment:
+      MIRROR_PORT: "8080"
+      MIRROR_OUT: /app/out/mirror.jsonl
+      MIRROR_MODE_FILE: /app/out/mode.txt
+      MIRROR_MODE: normal
+      MIRROR_SLOW_SECONDS: "5"
+    volumes:
+      - ./:/app
+    ports:
+      - "127.0.0.1:18081:8080"
+
+  envoy:
+    image: envoyproxy/envoy:v1.39.3
+    command: ["envoy", "-c", "/etc/envoy/envoy.yaml", "--log-level", "info"]
+    volumes:
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+    ports:
+      - "10000:10000"
+      - "127.0.0.1:9901:9901"
+    depends_on:
+      - primary
+      - mirror
+
+  envoy-shadow:
+    image: envoyproxy/envoy:v1.39.3
+    command: ["envoy", "-c", "/etc/envoy/envoy.yaml", "--log-level", "info"]
+    volumes:
+      - ./envoy-shadow.yaml:/etc/envoy/envoy.yaml:ro
+    ports:
+      - "10001:10000"
+      - "127.0.0.1:9902:9901"
+    depends_on:
+      - primary
+      - mirror
