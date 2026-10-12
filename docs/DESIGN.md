@@ -171,12 +171,23 @@ a failed original extraction makes it a full extraction, which now runs with the
 account cookies. So every follow-up is counted in the budget as a full extraction (section 7),
 and the original open is not known to have succeeded.
 
+- **Personalisation.** Since Jan added a throwaway account's cookies (2026-10-12), the server
+  fetches `/next`, and so `recommendedVideos`, signed in to that account
+  (`innertube/_client.py:257, 287-298`; `innertube/_video.py:60`). Follow-ups therefore reuse
+  related lists YouTube produced for that account; serendip itself holds no Google
+  credentials. Jan accepted this (2026-10-12) on condition that it is switchable.
+- **`SERENDIP_RELATED_SOURCE`** chooses where related videos come from: `followup` (default,
+  as above), `next` (serendip's own anonymous `/next` without cookies, unpersonalised, within
+  the `/next` budget in section 7), or `off` (subscriptions only). Changing it needs only a
+  restart.
 - One follow-up per observed open of a non-live video, skipped if the id was fetched in the
   last 6 hours. Opens observed before stage (b) are not followed up (their cache entries have
   expired).
 - serendip uses its own non-admin Yattee Server user for follow-ups and feed posts.
 - `deep` (anonymous `/next`, second hop) is built and tested but disabled
-  (`SERENDIP_NEXT_PER_HOUR=0`) until Jan decides the IP can take it.
+  (`SERENDIP_NEXT_PER_HOUR=0`) until Jan decides the IP can take it. With
+  `SERENDIP_RELATED_SOURCE=next`, first-hop related lists also come from `/next` and need a
+  non-zero `SERENDIP_NEXT_PER_HOUR`.
 
 `gems` is a tag, not a pool: items older than a year with high view counts in any pool get a
 small bonus so older videos keep appearing.
