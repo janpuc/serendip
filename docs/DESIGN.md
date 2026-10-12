@@ -199,8 +199,11 @@ full extraction job (section 7).
 - **Deferred** to a later stage: anonymous `/next` (and the vendored parser), second-hop
   related lists, and ranking channels by how many seeds they appeared under.
 
-`gems` is a tag, not a pool: items older than a year with high view counts in any pool get a
-small bonus so older videos keep appearing.
+`gems` is a tag, not a pool: items older than a year with at least 500,000 views in any pool
+get a small bonus (× 1.3) so older videos keep appearing.
+
+Items need a channel id (`UC` and 22 characters) to be served, for the caps. Related items
+carry only relative `publishedText`; serendip estimates `published` from it.
 
 - **`POST /api/v1/feed` is not free of side effects.** The server refreshes each channel's
   `last_requested`, schedules avatar fetches, and immediately queues a fetch for channels it has
@@ -265,8 +268,9 @@ A list (N = 30, head H = 5) is built in this order of precedence:
 
 1. **Hard constraints**: no video opened in the last 90 days; only valid items; channel caps;
    no video in more than two consecutive lists on one device.
-2. **Head**: positions 1 to H are always videos never served to the user before on any device,
-   so the pinned section and the top of the browse view are new on every refresh.
+2. **Head**: positions 1 to H (or to the number of new items, if fewer) are always videos never
+   served to the user before on any device, so the pinned section and the top of the browse
+   view are new on every refresh.
    `SERENDIP_HEAD_SIZE` should match the Home setting.
 3. **Carry-over**: from the previous list served on the same device, up to 30% of the returned
    list (`SERENDIP_CARRY_MAX`, a ceiling with no minimum), drawn by weight from items not opened
@@ -277,8 +281,13 @@ A list (N = 30, head H = 5) is built in this order of precedence:
 5. **Re-shown items**, served before but not in the previous list, fill in only when new items
    run out, the longest-ago first. Items of the previous list come back only through the
    carry-over allowance. If that is still not enough, the list is shorter.
+   **Last resort**: if these rules leave nothing while servable videos exist, the previous
+   list's videos come back as re-shown items in a new order, rather than an empty page. This
+   is the one exception to the two-consecutive-lists limit; it lasts until new items arrive.
 6. **Repeat**: a request from the same device within 15 s of a list gets that list again,
-   minus anything opened since. It records nothing new and does not extend the 15 s.
+   minus anything opened since. It records nothing new and does not extend the 15 s. Two
+   requests from one device at the same moment are therefore one list; two devices get
+   disjoint new items. An empty result is not recorded.
 
 - **Exposure ledger.** "Served" is tracked per user and video in a durable table (section 9),
   independent of the 30-day detailed impressions and of pool expiry, so a rediscovered video
@@ -318,14 +327,20 @@ work inside the server in two ways, both behind one breaker:
   rolling day, at least 10 minutes apart, one at a time; jitter never overrides a limit. This
   is a provisional ceiling, not a measured safe rate, and it is not raised to fix a thin pool.
   One job can mean several YouTube requests inside the server.
-- **Feed posts**: at most one every 6 hours; a post can queue fetches of uncached channels.
+- **Feed posts**: at most one HTTP call every 6 hours across all users, reserved before it is
+  sent; users and 500-channel chunks take turns from a durable cursor. A post can queue fetches
+  of uncached channels.
+- Every call goes through one gate that checks the breaker at the moment of sending. Budgets
+  use full-precision timestamps and, within the process, the monotonic clock; if the wall clock
+  and the monotonic clock disagree by more than 60 s, nothing is sent.
 
 **Breaker**, persistent across restarts, reset only by `serendip breaker reset`
 (`serendip breaker trip` stops everything by hand):
 
-- trips on sign-in or bot text in any response, on any 5xx, malformed response, transport
-  error or timeout, and on 401, 403 or 429 from the server (logged as an operational stop, not
-  as a bot-check);
+- trips on sign-in or bot text in any response (specific phrases, so a title such as "How to
+  sign in to Discord" does not), on any status other than 200 (redirects are not followed),
+  malformed response, transport error or timeout (`SERENDIP_SERVER_TIMEOUT_S`, 90 s), with 401,
+  403 and 429 logged as an operational stop rather than a bot-check;
 - a plain 404 (video unavailable) marks that seed failed without tripping it;
 - while open: no follow-ups and no feed posts; serving continues from the pool. It logs at
   ERROR, sets `serendip_breaker_open 1` and shows the reason in `/status`.
@@ -360,13 +375,15 @@ the heuristic as fallback.
 | `events` | id, user_id, ts_utc, device, kind, video_id, query |
 | `subscriptions` | user_id, channel_id, name, first_seen, last_seen_by_user |
 | `opens` | user_id, video_id, channel_id, last_open_utc, count (unique user_id + video_id) |
-| `videos` | video_id, title, author, author_id, length_s, published_est, view_count, thumbnails (JSON), found_at |
+| `videos` | video_id, title, author, author_id, length_s, published_est, published_text, view_count, view_count_text, is_live, is_upcoming, is_short, found_at (thumbnails are built from the video id) |
 | `pool` | user_id, video_id, source (`subs`/`related`/`adjacent`), seed_video_id (first seed only), found_at, expires_at (unique user_id + video_id) |
 | `lists` | id, user_id, device, ts_utc, seed, algorithm_version, size |
 | `impressions` | list_id, user_id, video_id, ts_utc, device, position, kind (`new`/`carried`/`reshown`) |
-| `exposures` | user_id, video_id, first_served, last_served, times_served (unique user_id + video_id; kept as long as the user exists) |
-| `followups` | video_id, reserved_at, sent_at, finished_at, status, seconds, extraction_method, outcome |
-| `budget`, `breaker` | single-row state |
+| `exposures` | user_id, video_id, first_served, last_served, times_served, times_carried (unique user_id + video_id; kept as long as the user exists) |
+| `followups` | id, video_id, reserved_at, sent_at, finished_at, status, seconds, extraction_method, related_count, outcome (rolling budgets and spacing are derived from it) |
+| `feed_runs` | user_id, chunk_offset, ts_utc (full precision), status, items, truncated (the global 6-hour interval holds across restarts) |
+| `feed_cursor` | next user and chunk offset (single row; users and chunks take turns) |
+| `breaker` | single-row state, including whether it was initialised (`SERENDIP_BREAKER_START_OPEN` opens it on the very first start) |
 
 Indexes cover the exclusion queries (opens by user and time, impressions by user and time).
 Retention: events 180 days, impressions and follow-ups 30 days, exposures kept. Migrations run in an
@@ -398,8 +415,8 @@ WAL every few minutes so a snapshot is consistent enough to restore.
   previous items opened; items at their carry limit; videos in both pools; channel caps that
   prevent the nominal mix. In every case: the head is never-served items; carried items stay
   within the carry ceiling of the returned list, are never opened, never keep their position,
-  and no video appears in more than two consecutive lists; re-shown items never bypass these
-  limits.
+  and no video appears in more than two consecutive lists, except through the last resort
+  when nothing else is servable; re-shown items never bypass these limits.
 - **History**: prune impressions, expire and rediscover candidates, restart; a previously
   served video is never new again.
 - **Concurrency**: simultaneous requests on one device and on two devices; disjoint new items;
