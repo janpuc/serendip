@@ -18,6 +18,15 @@ to the app's `Yattee/` directory, server paths to the yattee-server repository r
   `Views/Home/HomeView.swift:142-146, 1500-1517`). Jan accepted this (2026-10-12). The Home
   shortcut card opens a new browse view that fetches when it is created; iPhone also has
   pull-to-refresh there.
+- **A real refresh** (Jan, 2026-10-12): every refresh shows mostly videos he has not been shown
+  before, keeping at most 20-40% of the previous list, reshuffled (section 6.1). YouTube's own
+  refresh keeps about 95% and reorders it. *When* a refresh happens is up to the app: the
+  browse view fetches when it is opened and on pull-to-refresh (iPhone), and the pinned section
+  at most every 30 minutes. Popular has no load-more at the bottom: it is a single request
+  without parameters (`Services/API/YatteeServerAPI.swift:30-35`), and the browse view's
+  load-more covers only Subscriptions and Search (`InstanceBrowseView.swift:838-873`).
+  Pull-to-refresh on Home, a refresh action on Apple TV, or load-more for Popular would need a
+  change in the Yattee app.
 - **"Never shows something he finished"** is met by never showing a video he opened in the
   last 90 days. Opens serendip does not see (offline downloads, other sources) can slip
   through; Jan accepted this (2026-10-12). The browse view's "hide watched" option
@@ -163,15 +172,16 @@ small bonus so older videos keep appearing.
   text as the server does (`converters/_formatting.py:64-94`).
 - **Filters**: no video opened by the user in the last 90 days; no item with `lengthSeconds` 0
   (live and upcoming); no Shorts, approximated as `lengthSeconds` ≤ 180 unless known otherwise
-  (Shorts can run three minutes and related items do not say); no item shown to the user in
-  the last 2 hours.
+  (Shorts can run three minutes and related items do not say). Items already shown are
+  handled by the refresh rule (section 6.1).
 - **Expiry**: `subs` items 30 days after upload, others 30 days after they were found.
 
 ## 6. Selection
 
 Per request, from SQLite, target under 100 ms, N = 30.
 
-1. **Eligible set**: all pools merged and deduplicated by video id, filters applied.
+1. **Eligible set**: all pools merged and deduplicated by video id, filters applied, then
+   split by the refresh rule (section 6.1) into carry-over candidates and new items.
 2. **Weight** (all factors positive, floors keep cold start working):
    - `interest` = 1 + recency-weighted opens on the item's channel (half-life 30 days), with
      subscribed channels starting at 2 and adjacent channels at 1 + 0.5 × number of seeds they
@@ -188,18 +198,40 @@ Per request, from SQLite, target under 100 ms, N = 30.
 4. **Mix and caps while drawing**, not after: at most 2 items per channel, 1 for a channel the
    user does not follow; aim for roughly 40% subscriptions and 60% related or adjacent, by
    skipping a draw that would exceed the share while the other side still has candidates.
-5. **Shortage**: if fewer than N items qualify, return a shorter list. Filters are never
-   relaxed.
-6. **Impressions**: the chosen list is written in the same transaction that read the
-   eligible set, so the iPhone and the Apple TV cannot be served overlapping lists by a race.
+5. **Shortage**: if fewer than N items qualify after the fallback in section 6.1, return a
+   shorter list. The 90-day exclusion of opened videos is never relaxed.
+6. **Impressions**: the chosen list, with each item marked new, carried or re-shown, is written
+   in the same transaction that read the eligible set, so the iPhone and the Apple TV cannot be
+   served overlapping new items by a race.
 7. **Order**: subscriptions and discoveries interleaved.
 8. **Response**: a JSON array of `VideoListItem`, the shape of the server's `/api/v1/trending`
    (`models.py:127-150`). Yattee needs `videoId`, `title`, `author`, `authorId`,
    `lengthSeconds` on every item, and one bad item fails the whole list
    (`Services/API/YatteeServerAPI.swift:603-646`), so each item is validated before sending.
 
-Two lists within 2 hours do not share items, as long as the pool holds more than 60 eligible
-items under the caps. `/status` reports the eligible count so a thin pool is visible.
+### 6.1 Refresh
+
+Every `/popular` request is a refresh and gets a new list, except a repeat from the same device
+within 15 s, which gets the same list back (the app can ask twice in a row, for the Home section
+and the browse view).
+
+- **Carry-over**: from the previous list served to the same user on the same device, keep 30%
+  of N (configurable within 20-40%), drawn by weight from items the user has not opened since.
+  An item is carried at most twice, so it appears in at most three consecutive lists. Carried
+  items get new positions.
+- **New items**: the rest, at least 60%, are videos the user has never been shown on any
+  device. If the pool runs short, videos shown longest ago fill in next, never opened ones.
+- **Device**: "same device" uses the User-Agent mapping (section 4); without one, all of the
+  user's requests count as one device.
+- **Capacity**: at N = 30 each refresh uses about 21 never-shown videos. The pool's supply
+  (new uploads from subscriptions, plus about 19 related items for each of up to 30 `/next`
+  calls a day, before deduplication and filters) is an estimate, to be checked in stage (b).
+  `/status` reports how many never-shown eligible videos remain, and
+  `serendip_list_items_total{kind}` counts new, carried and re-shown items, so a pool that
+  cannot keep up with refreshes is visible.
+
+Two consecutive lists on one device share 20-40% of their items, as long as the pool holds
+enough never-shown videos.
 
 ## 7. Upstream budget
 
@@ -247,7 +279,8 @@ the heuristic as fallback.
 | `opens` | user_id, video_id, channel_id, last_open_utc, count (unique user_id + video_id) |
 | `videos` | video_id, title, author, author_id, length_s, published_est, view_count, thumbnails (JSON), found_at |
 | `pool` | user_id, video_id, source (`subs`/`related`/`adjacent`), seed_video_id, found_at, expires_at (unique user_id + video_id + source) |
-| `impressions` | user_id, video_id, ts_utc, device, position, request_id |
+| `lists` | id, user_id, device, ts_utc, seed, algorithm_version, size |
+| `impressions` | list_id, user_id, video_id, ts_utc, device, position, kind (`new`/`carried`/`reshown`), times_carried |
 | `upstream_attempts` | ts_utc, kind, target, status, seconds, outcome |
 | `budget`, `breaker` | single-row state |
 
@@ -278,10 +311,14 @@ WAL every few minutes so a snapshot is consistent enough to restore.
   malformed credentials, and no outgoing request in any case); redaction; budget and breaker
   transitions; vendored parser
   against upstream's tests plus recorded real `/next` responses; response validation.
-- **Selection**: deterministic under a seed and snapshot; never returns opened (90 days) or
-  recently shown items; caps and the subscription share hold during the draw; shortage returns
-  a shorter list; two consecutive lists do not overlap when the pool is large enough; the same
-  device at 08:00 and at 21:00 gets a different length mix.
+- **Selection**: deterministic under a seed and snapshot; never returns opened (90 days)
+  items; caps and the subscription share hold during the draw; shortage returns a shorter list;
+  the same device at 08:00 and at 21:00 gets a different length mix.
+- **Refresh**: consecutive lists on one device overlap by 20-40% when the previous list has
+  enough unopened items; carried items are never opened ones, get new positions, and no item
+  appears in more than three consecutive lists; new items are never-shown ones while the pool
+  has them, then the least recently shown; a repeat within 15 s returns the same list; lists on
+  two devices do not share new items.
 - **Integration**: FastAPI test client with a fake Yattee Server and fake InnerTube (respx):
   mirrored events → worker → pool → `/popular`, asserting the number of upstream attempts.
 - **Live (Jan, after each deploy)**: mirrors arrive (stage a); lists on iPhone and Apple TV
@@ -305,6 +342,8 @@ WAL every few minutes so a snapshot is consistent enough to restore.
   `/next` budget of 3 an hour stands.
 - Whether a current `/next` response offers a continuation for more related items (upstream
   never asks for one).
+- Whether to ask Yattee upstream for pull-to-refresh on Home, a refresh action on Apple TV, or
+  load-more for Popular (section 1).
 - Jan: custom User-Agent strings per device (optional); whether Shorts stay out with the
   180-second cut-off; list size 30; create the `serendip` user in Yattee Server's admin UI and
   a 1Password field for it before stage (a) deploys.
