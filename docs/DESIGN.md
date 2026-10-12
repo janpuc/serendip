@@ -155,8 +155,28 @@ Built by a background worker; requests only read it.
 | Pool | Source | Upstream |
 |---|---|---|
 | `subs` | `POST /api/v1/feed` with the user's active subscriptions, uploads from the last 30 days | none from YouTube in the normal case, see below |
-| `related` | anonymous InnerTube `/next` for selected seeds: recent opens, and recent `subs` uploads the user opened | 1 request per seed, budgeted |
+| `related` | **follow-up**: `GET /api/v1/videos/{id}` on the in-cluster server about 60 s after the user opens a video, keeping its `recommendedVideos` | usually none, see 5.1; budgeted as a full extraction |
+| `deep` | anonymous InnerTube `/next` for related items of opened videos (second hop) | 1 request per seed; **off by default** |
 | `adjacent` | items in related lists whose channel the user does not follow; channels appearing in related lists of two or more different seeds rank higher | none (from `related`) |
+
+### 5.1 Follow-ups instead of YouTube calls
+
+After the bot-check of 2026-10-12 (`docs/SPIKE.md`, Q5) serendip makes no YouTube calls of its
+own by default. Related videos come from the server: when serendip observes an open, it asks the
+in-cluster server for the same video about 60 s later. The server answered that id for the app
+moments before, and both of its caches (InnerTube and yt-dlp) are keyed by video id only, with
+a one-hour TTL (`innertube/_video.py:24-52`, `ytdlp_wrapper/_youtube.py:95-110`), so the
+follow-up normally causes no upstream request. It is not guaranteed to: a restart, eviction, or
+a failed original extraction makes it a full extraction, which now runs with the server's
+account cookies. So every follow-up is counted in the budget as a full extraction (section 7),
+and the original open is not known to have succeeded.
+
+- One follow-up per observed open of a non-live video, skipped if the id was fetched in the
+  last 6 hours. Opens observed before stage (b) are not followed up (their cache entries have
+  expired).
+- serendip uses its own non-admin Yattee Server user for follow-ups and feed posts.
+- `deep` (anonymous `/next`, second hop) is built and tested but disabled
+  (`SERENDIP_NEXT_PER_HOUR=0`) until Jan decides the IP can take it.
 
 `gems` is a tag, not a pool: items older than a year with high view counts in any pool get a
 small bonus so older videos keep appearing.
@@ -241,15 +261,22 @@ subscribed channel per run (66 channels). YouTube is reached from a hosted IP
 (a Warsaw hosting network), which is flagged sooner than a residential one. The Q5 measurement
 (`docs/SPIKE.md`) is an initial observation of tolerance, not proof of a safe rate.
 
-v1 makes exactly one kind of YouTube request: `/next`.
+By default serendip makes no YouTube requests of its own. Two kinds of call can reach
+YouTube, both budgeted and both behind one breaker:
 
-- **Budget**: 3 per hour, 30 per day, one at a time, ±30% jitter, persisted so restarts do not
-  reset it. Fixed client version (no homepage fetches). No automatic retries.
-- **Breaker**: HTTP 429 or 403, a response containing sign-in or bot text, or a response
-  without `contents` stops all `/next` calls until Jan re-enables them (`serendip breaker
-  reset`, or an env flag). It logs at ERROR, sets `serendip_breaker_open 1`, and shows the
-  reason in `/status`. Serving continues from the pool. The `UNPLAYABLE`/`LOGIN_REQUIRED`
-  states the server already logs for anonymous `/player` are normal and not a trigger.
+- **Follow-ups** through the server (section 5.1): at most 2 per hour and 20 per day, one at a
+  time, ±30% jitter, persisted so restarts do not reset it, each counted as a full extraction.
+  Response time and `extractionMethod` are recorded so cache hits and misses are visible.
+- **`/next`** (`deep`): 0 per hour by default. When enabled, one at a time, fixed client
+  version (no homepage fetches), no cookies, no automatic retries.
+- **Feed posts** (`POST /api/v1/feed`) read the server's database; at most one every 6 hours,
+  only for the user's own subscriptions.
+- **Breaker**: a follow-up answered 404 with sign-in or bot text, or 5xx; for `/next` an HTTP 429
+  or 403, sign-in or bot text, or a response without `contents`. Any of them stops all
+  follow-ups and `/next` calls until Jan re-enables them (`serendip breaker reset`). It logs at
+  ERROR, sets `serendip_breaker_open 1`, and shows the reason in `/status`. Serving continues
+  from the pool. The `UNPLAYABLE`/`LOGIN_REQUIRED` states the server logs for anonymous
+  `/player` are normal and not a trigger.
 - **Metrics** (Prometheus, scraped through a ServiceMonitor by the cluster's
   kube-prometheus-stack): `serendip_jobs_total{job,outcome}`,
   `serendip_server_requests_total{endpoint,status}` for calls to Yattee Server, and
@@ -339,8 +366,8 @@ WAL every few minutes so a snapshot is consistent enough to restore.
 ## 13. Open items
 
 - Q5 (`docs/SPIKE.md`): 42 of 42 heavy lookups were clean, but the server was bot-checked
-  2 h 20 min later at a much lower rate, and the server now uses account cookies. Whether
-  serendip makes any direct `/next` calls, and at what rate, is to be decided before stage (b).
+  2 h 20 min later at a much lower rate, and it now uses a throwaway account's cookies. Stage
+  (b) therefore takes related videos from follow-ups (section 5.1) and leaves `/next` off.
 - Whether a current `/next` response offers a continuation for more related items (upstream
   never asks for one).
 - Jan: custom User-Agent strings per device (optional); whether Shorts stay out with the
