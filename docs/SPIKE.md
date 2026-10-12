@@ -131,6 +131,15 @@ so about 60 an hour of them was tolerated for half an hour from the cluster's ho
 shows tolerance at that rate on that day, not a safe ceiling. serendip's planned `/next`
 budget (3 an hour, 30 a day, one request each) is below a twentieth of it.
 
+**Bot-check the same afternoon.** At 15:46-15:47, 2 h 20 min after the probe ended, yt-dlp on
+the server got "Sign in to confirm you're not a bot" for 3 videos (4 attempts from the app,
+2 from the admin UI). Between the probe and the bot-check the server made 14 `/player` and 67
+`/browse` calls from ordinary use; serendip made none. At 15:55 account cookies were uploaded
+to the server's YouTube site entry, and extraction worked again. The probe may have contributed
+to the IP's reputation; it cannot be ruled in or out. The conclusion: a clean half hour at 60
+heavy lookups an hour says nothing about a safe sustained rate from this IP, and any budget
+serendip uses must assume the IP is already marginal.
+
 Two earlier attempts stopped on their own safety rule (two empty related lists in a row):
 `/trending` for the egress IP returned mostly live streams, which the server serves without
 related videos. Not a bot-check.

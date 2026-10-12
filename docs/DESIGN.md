@@ -338,8 +338,9 @@ WAL every few minutes so a snapshot is consistent enough to restore.
 
 ## 13. Open items
 
-- Q5 (`docs/SPIKE.md`): 42 of 42 heavy lookups clean at up to about 60 an hour, so the
-  `/next` budget of 3 an hour stands.
+- Q5 (`docs/SPIKE.md`): 42 of 42 heavy lookups were clean, but the server was bot-checked
+  2 h 20 min later at a much lower rate, and the server now uses account cookies. Whether
+  serendip makes any direct `/next` calls, and at what rate, is to be decided before stage (b).
 - Whether a current `/next` response offers a continuation for more related items (upstream
   never asks for one).
 - Jan: custom User-Agent strings per device (optional); whether Shorts stay out with the
