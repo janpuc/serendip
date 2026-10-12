@@ -25,8 +25,8 @@ to the app's `Yattee/` directory, server paths to the yattee-server repository r
   at most every 30 minutes. Popular has no load-more at the bottom: it is a single request
   without parameters (`Services/API/YatteeServerAPI.swift:30-35`), and the browse view's
   load-more covers only Subscriptions and Search (`InstanceBrowseView.swift:838-873`).
-  Pull-to-refresh on Home, a refresh action on Apple TV, or load-more for Popular would need a
-  change in the Yattee app.
+  No changes to the Yattee app (Jan, 2026-10-12): serendip treats the requests the app already
+  sends as the refresh events and reacts to them.
 - **"Never shows something he finished"** is met by never showing a video he opened in the
   last 90 days. Opens serendip does not see (offline downloads, other sources) can slip
   through; Jan accepted this (2026-10-12). The browse view's "hide watched" option
@@ -342,8 +342,6 @@ WAL every few minutes so a snapshot is consistent enough to restore.
   `/next` budget of 3 an hour stands.
 - Whether a current `/next` response offers a continuation for more related items (upstream
   never asks for one).
-- Whether to ask Yattee upstream for pull-to-refresh on Home, a refresh action on Apple TV, or
-  load-more for Popular (section 1).
 - Jan: custom User-Agent strings per device (optional); whether Shorts stay out with the
   180-second cut-off; list size 30; create the `serendip` user in Yattee Server's admin UI and
   a 1Password field for it before stage (a) deploys.
