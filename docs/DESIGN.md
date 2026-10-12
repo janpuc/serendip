@@ -301,7 +301,8 @@ WAL every few minutes so a snapshot is consistent enough to restore.
 
 ## 13. Open items
 
-- Q5 result (`docs/SPIKE.md`): confirms or lowers the `/next` budget.
+- Q5 (`docs/SPIKE.md`): 42 of 42 heavy lookups clean at up to about 60 an hour, so the
+  `/next` budget of 3 an hour stands.
 - Whether a current `/next` response offers a continuation for more related items (upstream
   never asks for one).
 - Jan: custom User-Agent strings per device (optional); whether Shorts stay out with the

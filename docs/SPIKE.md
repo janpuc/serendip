@@ -4,7 +4,7 @@ Source read: `yattee/yattee` at tag 2.0.0-beta.270 and `yattee/yattee-server` at
 versions Jan runs. App paths are relative to `Yattee/`, server paths to the repo root. Two scouts
 did the first pass; the claims below that the design depends on were re-checked by hand.
 The live deployment was then checked read-only (logs, admin API, DNS); see "Live cluster".
-Q5 (live rate measurement) is still open.
+Q5 was measured live on 2026-10-12 (see Q5).
 
 ## Live cluster (checked 2026-10-12, server deployed 10:54 the same day)
 
@@ -119,7 +119,22 @@ Q5 (live rate measurement) is still open.
   the server's camelCase keys decode as they are): required `videoId`, `title`, `author`,
   `authorId`, `lengthSeconds`; everything else optional. A single bad item fails the whole list.
 
-## Q5. Upstream cost and the bot-check budget (measurement still open)
+## Q5. Upstream cost and the bot-check budget
+
+**Measured 2026-10-12, 11:55-13:26** with `scripts/spike_related_budget.py` through the public
+hostname: 42 cold `GET /api/v1/videos/{id}` lookups on distinct videos, seeded from the
+subscriptions feed and walking related lists. Phase A: 12 lookups about 5 minutes apart;
+phase B: 30 lookups about 1 minute apart. **All 42 returned 200 with a related list (19-20
+items), extraction `hybrid`, 2.5-7.6 s each (mean 3.5 s); no bot-check text, no empty lists.**
+Each lookup is the server's heaviest request (InnerTube `/player` + `/next` and a yt-dlp run),
+so about 60 an hour of them was tolerated for half an hour from the cluster's hosted IP. This
+shows tolerance at that rate on that day, not a safe ceiling. serendip's planned `/next`
+budget (3 an hour, 30 a day, one request each) is below a twentieth of it.
+
+Two earlier attempts stopped on their own safety rule (two empty related lists in a row):
+`/trending` for the egress IP returned mostly live streams, which the server serves without
+related videos. Not a bot-check.
+
 
 - One cold `GET /api/v1/videos/{id}` = InnerTube `/player` + `/next` in parallel, sometimes a
   second `/player` (TVHTML5, for storyboards), **plus a full yt-dlp extraction** with a PO
