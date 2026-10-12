@@ -18,9 +18,10 @@ to the app's `Yattee/` directory, server paths to the yattee-server repository r
   `Views/Home/HomeView.swift:142-146, 1500-1517`). Jan accepted this (2026-10-12). The Home
   shortcut card opens a new browse view that fetches when it is created; iPhone also has
   pull-to-refresh there.
-- **A real refresh** (Jan, 2026-10-12): every refresh shows mostly videos he has not been shown
-  before, keeping at most 20-40% of the previous list, reshuffled (section 6.1). YouTube's own
-  refresh keeps about 95% and reorders it. *When* a refresh happens is up to the app: the
+- **A real refresh** (Jan, 2026-10-12): a refresh must not look like the same page again. Each
+  one shows mostly videos he has not been served before, with at most about a third carried
+  over and reshuffled (section 6.1); the numbers are a starting point, not a requirement.
+  YouTube's own refresh keeps about 95% and reorders it. *When* a refresh happens is up to the app: the
   browse view fetches when it is opened and on pull-to-refresh (iPhone), and the pinned section
   at most every 30 minutes. Popular has no load-more at the bottom: it is a single request
   without parameters (`Services/API/YatteeServerAPI.swift:30-35`), and the browse view's
@@ -263,15 +264,14 @@ serendip serves, not about what a screen happens to show.
 A list (N = 30, head H = 5) is built in this order of precedence:
 
 1. **Hard constraints**: no video opened in the last 90 days; only valid items; channel caps;
-   no video in more than three consecutive lists on one device.
+   no video in more than two consecutive lists on one device.
 2. **Head**: positions 1 to H are always videos never served to the user before on any device,
    so the pinned section and the top of the browse view are new on every refresh.
    `SERENDIP_HEAD_SIZE` should match the Home setting.
 3. **Carry-over**: from the previous list served on the same device, up to 30% of the returned
-   list (configurable within 20-40%; the ceiling is enforced against the actual list size),
-   drawn by weight from items not opened since, placed after the head and never at their
-   previous position. The lower bound holds only when enough previous items are still
-   eligible.
+   list (`SERENDIP_CARRY_MAX`, a ceiling with no minimum), drawn by weight from items not opened
+   since, placed after the head and never at their previous position. A video is carried over
+   once at most.
 4. **New items** fill the rest: never served to the user on any device. The 40% subscriptions
    to 60% discoveries split is a soft target; when one side runs out, the other fills.
 5. **Re-shown items**, served before but not in the previous list, fill in only when new items
@@ -297,7 +297,8 @@ A list (N = 30, head H = 5) is built in this order of precedence:
   never-served eligible videos remain, and `serendip_list_items_total{kind}` counts new,
   carried and re-shown items.
 
-Two consecutive lists on one device share at most 40% of their items, and their heads none.
+Two consecutive lists on one device share at most about a third of their items, and their
+heads none.
 
 ## 7. Upstream budget
 
@@ -396,8 +397,9 @@ WAL every few minutes so a snapshot is consistent enough to restore.
 - **Refresh matrix**: abundant, scarce and empty pools; short previous and current lists; all
   previous items opened; items at their carry limit; videos in both pools; channel caps that
   prevent the nominal mix. In every case: the head is never-served items; carried items stay
-  within 40% of the returned list, are never opened, never keep their position, and no video
-  appears in more than three consecutive lists; re-shown items never bypass these limits.
+  within the carry ceiling of the returned list, are never opened, never keep their position,
+  and no video appears in more than two consecutive lists; re-shown items never bypass these
+  limits.
 - **History**: prune impressions, expire and rediscover candidates, restart; a previously
   served video is never new again.
 - **Concurrency**: simultaneous requests on one device and on two devices; disjoint new items;
