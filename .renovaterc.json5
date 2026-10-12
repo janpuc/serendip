@@ -1,0 +1,97 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: [
+    "config:recommended",
+    ":dependencyDashboard",
+    // Force chore(deps): on every update so dependency PRs never trip a
+    // release-please release - they ride along into the next real release.
+    ":semanticCommitTypeAll(chore)",
+    // Pin base-image tags to digests so the image build is reproducible.
+    "docker:pinDigests",
+    ":timezone(Europe/Warsaw)",
+  ],
+  labels: ["dependencies"],
+  rangeStrategy: "bump",
+  // Open a PR for *every* update, majors included, and don't rate-limit
+  // creation - nothing should sit silently behind dashboard approval.
+  dependencyDashboardApproval: false,
+  prConcurrentLimit: 0,
+  prHourlyLimit: 0,
+  lockFileMaintenance: {
+    enabled: true,
+    schedule: ["before 6am on Monday"],
+  },
+  vulnerabilityAlerts: {
+    labels: ["security"],
+  },
+  packageRules: [
+    // ---- Auto-merge (always via a PR, so CI gates every merge) ----
+    {
+      description: "Auto-merge trusted GitHub Actions quickly",
+      matchManagers: ["github-actions"],
+      matchPackageNames: ["/^actions\\//", "/^docker\\//", "/^googleapis\\//", "/^renovatebot\\//"],
+      matchUpdateTypes: ["minor", "patch", "digest"],
+      automerge: true,
+      automergeType: "pr",
+      minimumReleaseAge: "1 minute",
+    },
+    {
+      description: "Auto-merge other GitHub Actions after a short cooldown",
+      matchManagers: ["github-actions"],
+      matchUpdateTypes: ["minor", "patch", "digest"],
+      automerge: true,
+      automergeType: "pr",
+      minimumReleaseAge: "3 days",
+    },
+    {
+      description: "Auto-merge dev-dependency minor/patch",
+      matchDepTypes: ["project.optional-dependencies", "dependency-groups"],
+      matchUpdateTypes: ["minor", "patch", "pin", "digest"],
+      groupName: "dev dependencies",
+      automerge: true,
+      automergeType: "pr",
+      minimumReleaseAge: "3 days",
+    },
+    {
+      description: "Auto-merge production patch bumps (bugfix-level, CI-gated)",
+      matchDepTypes: ["project.dependencies"],
+      matchUpdateTypes: ["patch"],
+      groupName: "production patches",
+      automerge: true,
+      automergeType: "pr",
+      minimumReleaseAge: "3 days",
+    },
+    // ---- Grouped for review: a PR is created, but it is NOT auto-merged ----
+    {
+      description: "Batch production minor updates for review",
+      matchDepTypes: ["project.dependencies"],
+      matchUpdateTypes: ["minor"],
+      groupName: "production dependencies",
+    },
+    {
+      description: "Batch GitHub Actions major bumps into a single review PR",
+      matchManagers: ["github-actions"],
+      matchUpdateTypes: ["major"],
+      groupName: "github-actions (major)",
+    },
+    {
+      description: "Auto-merge base image digest and patch bumps (CI-gated)",
+      matchDatasources: ["docker"],
+      matchUpdateTypes: ["digest", "patch"],
+      automerge: true,
+      automergeType: "pr",
+      minimumReleaseAge: "3 days",
+    },
+    // ---- Majors always get a PR, but are never auto-merged (review by hand) ----
+    {
+      description: "Never auto-merge major updates",
+      matchUpdateTypes: ["major"],
+      automerge: false,
+    },
+    // ---- Labels by update type (home-ops convention) ----
+    { matchUpdateTypes: ["major"], addLabels: ["type/major"] },
+    { matchUpdateTypes: ["minor"], addLabels: ["type/minor"] },
+    { matchUpdateTypes: ["patch"], addLabels: ["type/patch"] },
+    { matchUpdateTypes: ["digest"], addLabels: ["type/digest"] },
+  ],
+}

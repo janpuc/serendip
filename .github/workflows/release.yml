@@ -1,0 +1,121 @@
+name: Release
+
+# Hands-off releases via Release Please, plus the container image build.
+#
+#   1. Every push to main, release-please reads the Conventional Commits since
+#      the last release and opens/updates a "release PR" that bumps the version
+#      in pyproject.toml and writes CHANGELOG.md.
+#   2. Merging that PR creates the git tag (vX.Y.Z) and the GitHub Release.
+#   3. The `image` job then builds the image ONCE per push and tags it
+#      `:edge` + `:sha-<short>`; when this push is a release it ALSO tags the same
+#      build `:X.Y.Z`, `:X.Y`, `:X`, `:latest`. Doing it in one job (instead of a
+#      separate edge workflow) means a release merge builds the image once, not
+#      twice. It also sidesteps the "GITHUB_TOKEN can't re-trigger a tag-push
+#      workflow" trap - no PAT needed.
+#   The image job also waits for the `test` job, so a red main never publishes an image.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+      version: ${{ steps.rp.outputs.version }}
+      major: ${{ steps.rp.outputs.major }}
+      minor: ${{ steps.rp.outputs.minor }}
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: rp
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    name: Lint & test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+
+      - run: uv sync --locked --extra dev
+      - run: uv run ruff check
+      - run: uv run ruff format --check
+      - run: uv run pytest -q
+
+  image:
+    needs: [release-please, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # On a release this is the tagged commit; otherwise main HEAD - same
+          # commit either way, since release-please tags the merge commit.
+          ref: ${{ needs.release-please.outputs.tag_name || github.sha }}
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags & version
+        id: meta
+        env:
+          REPO: ghcr.io/${{ github.repository }}
+          RELEASED: ${{ needs.release-please.outputs.release_created }}
+          VERSION: ${{ needs.release-please.outputs.version }}
+          MAJOR: ${{ needs.release-please.outputs.major }}
+          MINOR: ${{ needs.release-please.outputs.minor }}
+        run: |
+          short="${GITHUB_SHA::7}"
+          tags="$REPO:edge"$'\n'"$REPO:sha-$short"
+          ver="edge-$short"
+          if [ "$RELEASED" = "true" ]; then
+            tags="$tags"$'\n'"$REPO:$VERSION"$'\n'"$REPO:$MAJOR.$MINOR"$'\n'"$REPO:$MAJOR"$'\n'"$REPO:latest"
+            ver="$VERSION"
+          fi
+          {
+            echo "tags<<EOF"
+            echo "$tags"
+            echo "EOF"
+            echo "version=$ver"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build & push (amd64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=serendip
+            org.opencontainers.image.description=A discover-feed proxy in front of Yattee Server.
+            org.opencontainers.image.source=https://github.com/janpuc/serendip
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+          build-args: |
+            SERENDIP_VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
