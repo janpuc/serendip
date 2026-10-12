@@ -1,7 +1,7 @@
 # serendip design
 
-Status: revised after the advisor review, 2026-10-12. Nothing is built yet. Evidence for every
-claim about Yattee, Yattee Server and the cluster is in `docs/SPIKE.md`. App paths are relative
+Status: stage (a) is live (2026-10-12); stage (b) revised after the second advisor review the
+same day. Evidence for every claim about Yattee, Yattee Server and the cluster is in `docs/SPIKE.md`. App paths are relative
 to the app's `Yattee/` directory, server paths to the yattee-server repository root.
 
 ## 1. Decisions
@@ -40,8 +40,8 @@ to the app's `Yattee/` directory, server paths to the yattee-server repository r
 
 uv, FastAPI, httpx, ruff, pytest, as the brief says, kept on the evidence:
 
-- The fragile code serendip owns is the InnerTube `/next` request and the parser for related
-  items. Yattee Server has the parser in Python under MIT: 261 self-contained lines
+- The fragile code serendip will own once anonymous `/next` is added (stage c) is the
+  InnerTube request and the parser for related items. Yattee Server has the parser in Python under MIT: 261 self-contained lines
   (`innertube/_converters.py:16-115, 940-1139`) with synthetic tests
   (`tests/test_innertube_recommended_videos.py`). serendip vendors the parser and tests with
   attribution and re-syncs when upstream fixes a YouTube layout change. It writes its own small
@@ -57,8 +57,8 @@ Yattee app ──► Envoy (yattee.janpuc.com) ──► yattee-server:8085     
                     ├─ RequestMirror ───────► serendip:8081 (ingest)     (record, reply 204)
                     └─ GET /api/v1/popular ─► serendip:8080 (api)        (stage b)
 
-serendip worker ──► yattee-server:8085 in-cluster, own user: POST /api/v1/feed (stage b)
-                └─► www.youtube.com/youtubei/v1/next   (anonymous, budgeted)
+serendip worker ──► yattee-server:8085 in-cluster, own user (stage b):
+                    POST /api/v1/feed, GET /api/v1/videos/{id} follow-ups
 ```
 
 serendip listens on two ports: **8080** for `/api/v1/popular`, `/health`, `/status` and
@@ -155,39 +155,48 @@ Built by a background worker; requests only read it.
 | Pool | Source | Upstream |
 |---|---|---|
 | `subs` | `POST /api/v1/feed` with the user's active subscriptions, uploads from the last 30 days | none from YouTube in the normal case, see below |
-| `related` | **follow-up**: `GET /api/v1/videos/{id}` on the in-cluster server about 60 s after the user opens a video, keeping its `recommendedVideos` | usually none, see 5.1; budgeted as a full extraction |
-| `deep` | anonymous InnerTube `/next` for related items of opened videos (second hop) | 1 request per seed; **off by default** |
-| `adjacent` | items in related lists whose channel the user does not follow; channels appearing in related lists of two or more different seeds rank higher | none (from `related`) |
+| `related` | **follow-up**: `GET /api/v1/videos/{id}` on the in-cluster server about 60 s after the user opens a video, keeping its `recommendedVideos` | unknown per call, see 5.1; reserved as a full extraction |
+| `adjacent` | items in related lists whose channel the user does not follow | none (from `related`) |
 
 ### 5.1 Follow-ups instead of YouTube calls
 
 After the bot-check of 2026-10-12 (`docs/SPIKE.md`, Q5) serendip makes no YouTube calls of its
-own by default. Related videos come from the server: when serendip observes an open, it asks the
+own. Related videos come from the server: when serendip observes an open, it asks the
 in-cluster server for the same video about 60 s later. The server answered that id for the app
-moments before, and both of its caches (InnerTube and yt-dlp) are keyed by video id only, with
-a one-hour TTL (`innertube/_video.py:24-52`, `ytdlp_wrapper/_youtube.py:95-110`), so the
-follow-up normally causes no upstream request. It is not guaranteed to: a restart, eviction, or
-a failed original extraction makes it a full extraction, which now runs with the server's
-account cookies. So every follow-up is counted in the budget as a full extraction (section 7),
-and the original open is not known to have succeeded.
+moments before. Both of its caches (InnerTube and yt-dlp) are keyed by video id only, hold 100
+entries and expire an hour after they were filled; a read does not renew them
+(`innertube/_video.py:24-52`, `ytdlp_wrapper/_cache.py:18-24`, `settings.py:21`). So a
+follow-up usually causes no upstream request, but not always: after a restart or an eviction,
+for an entry about to expire, while the original is still extracting, or when the original
+failed, it becomes a full extraction inside the server (`/player`, `/next`, sometimes a second
+`/player`, and a yt-dlp run, with the server's own retries), now with the account's cookies.
+serendip cannot tell which happened. Every follow-up is therefore reserved in the budget as a
+full extraction job (section 7).
 
 - **Personalisation.** Since Jan added a throwaway account's cookies (2026-10-12), the server
   fetches `/next`, and so `recommendedVideos`, signed in to that account
-  (`innertube/_client.py:257, 287-298`; `innertube/_video.py:60`). Follow-ups therefore reuse
-  related lists YouTube produced for that account; serendip itself holds no Google
-  credentials. Jan accepted this (2026-10-12) on condition that it is switchable.
-- **`SERENDIP_RELATED_SOURCE`** chooses where related videos come from: `followup` (default,
-  as above), `next` (serendip's own anonymous `/next` without cookies, unpersonalised, within
-  the `/next` budget in section 7), or `off` (subscriptions only). Changing it needs only a
-  restart.
-- One follow-up per observed open of a non-live video, skipped if the id was fetched in the
-  last 6 hours. Opens observed before stage (b) are not followed up (their cache entries have
-  expired).
-- serendip uses its own non-admin Yattee Server user for follow-ups and feed posts.
-- `deep` (anonymous `/next`, second hop) is built and tested but disabled
-  (`SERENDIP_NEXT_PER_HOUR=0`) until Jan decides the IP can take it. With
-  `SERENDIP_RELATED_SOURCE=next`, first-hop related lists also come from `/next` and need a
-  non-zero `SERENDIP_NEXT_PER_HOUR`.
+  (`innertube/_client.py:257, 287-298`; `innertube/_video.py:60`). Follow-ups reuse related
+  lists YouTube produced for that account; serendip itself holds no Google credentials. The
+  server runs yt-dlp without `--mark-watched` and makes no playback-reporting calls
+  (`ytdlp_wrapper/_youtube.py:112-120`), so it does not knowingly build a watch history on the
+  account; what Google records from signed-in `/next` calls is unknown. Jan accepted this
+  (2026-10-12) on condition that it is switchable.
+- **`SERENDIP_RELATED_SOURCE`**: `followup` (default) or `off` (subscriptions only), applied at
+  restart. A third value, `next` (serendip's own anonymous `/next`, unpersonalised), is
+  reserved for a later stage and refused at startup until it exists.
+- **Scheduling.** A follow-up is attempted about 60 s after the observed open and dropped if it
+  cannot start within 120 s (budget used up, breaker open, another follow-up running). It is
+  never queued for later, so a delayed job cannot turn into a deliberate cold extraction.
+  Follow-ups are deduplicated by video id across users and skipped for ids fetched in the last
+  6 hours or that failed before. Seeds known to be live are skipped; an open does not say
+  whether a video is live, so most cannot be checked in advance. The reservation is written
+  before the request is sent and counts even if the request fails or times out; pending work is
+  not replayed after a restart. No retries.
+- Opens observed before stage (b) are not followed up.
+- serendip uses its own non-admin Yattee Server user for follow-ups and feed posts, never the
+  credentials of incoming requests.
+- **Deferred** to a later stage: anonymous `/next` (and the vendored parser), second-hop
+  related lists, and ranking channels by how many seeds they appeared under.
 
 `gems` is a tag, not a pool: items older than a year with high view counts in any pool get a
 small bonus so older videos keep appearing.
@@ -196,8 +205,11 @@ small bonus so older videos keep appearing.
   `last_requested`, schedules avatar fetches, and immediately queues a fetch for channels it has
   not cached (`routers/subscriptions.py:152-160, 182-188`). serendip posts only channels the
   user has posted in the last 30 days, which the server already watches because of the app, at
-  most every 6 hours. It never posts adjacent or exploration channels: the server would poll
-  each one every 6 hours until 14 days pass without a post (`feed_fetcher.py:786-792`).
+  most every 6 hours, with `limit` 1000 (the server's maximum; its default is 50,
+  `routers/subscriptions.py:65-68`), and records when the answer was truncated. It never posts
+  adjacent or exploration channels: the server would poll each one every 6 hours until 14 days
+  pass without a post (`feed_fetcher.py:786-792`). Because a post can queue upstream fetches,
+  feed posts pause while the breaker is open.
 - Related items carry only relative `publishedText` and hard-code `isShort` false
   (`innertube/_converters.py:1093-1100`). serendip derives an approximate upload time from the
   text as the server does (`converters/_formatting.py:64-94`).
@@ -215,8 +227,7 @@ Per request, from SQLite, target under 100 ms, N = 30.
    split by the refresh rule (section 6.1) into carry-over candidates and new items.
 2. **Weight** (all factors positive, floors keep cold start working):
    - `interest` = 1 + recency-weighted opens on the item's channel (half-life 30 days), with
-     subscribed channels starting at 2 and adjacent channels at 1 + 0.5 × number of seeds they
-     appeared under, capped;
+     subscribed channels starting at 2 and adjacent channels at 1;
    - `freshness` = 0.3 + 0.7 × exp(−age / 14 days) for `subs`; 1 for everything else
      (`related` and `adjacent` are not penalised for age; `gems` gets × 1.3);
    - `daypart` = an explicit prior on video length per daypart (for example morning favours
@@ -242,27 +253,51 @@ Per request, from SQLite, target under 100 ms, N = 30.
 
 ### 6.1 Refresh
 
-Every `/popular` request is a refresh and gets a new list, except a repeat from the same device
-within 15 s, which gets the same list back (the app can ask twice in a row, for the Home section
-and the browse view).
+Every `/popular` request that reaches serendip is a refresh. The app sends one when the browse
+view is opened or pulled to refresh, and when the pinned Home section's 30-minute cache has
+expired; the two keep separate copies. Home shows only the first items of the list, 5 by
+default and adjustable from 1 to 20 in Yattee's Home settings (`Views/Home/HomeView.swift:1354`,
+`Views/Home/HomeSettingsView.swift:23, 295`). The rules below are about consecutive lists
+serendip serves, not about what a screen happens to show.
 
-- **Carry-over**: from the previous list served to the same user on the same device, keep 30%
-  of N (configurable within 20-40%), drawn by weight from items the user has not opened since.
-  An item is carried at most twice, so it appears in at most three consecutive lists. Carried
-  items get new positions.
-- **New items**: the rest, at least 60%, are videos the user has never been shown on any
-  device. If the pool runs short, videos shown longest ago fill in next, never opened ones.
-- **Device**: "same device" uses the User-Agent mapping (section 4); without one, all of the
-  user's requests count as one device.
-- **Capacity**: at N = 30 each refresh uses about 21 never-shown videos. The pool's supply
-  (new uploads from subscriptions, plus about 19 related items for each of up to 30 `/next`
-  calls a day, before deduplication and filters) is an estimate, to be checked in stage (b).
-  `/status` reports how many never-shown eligible videos remain, and
-  `serendip_list_items_total{kind}` counts new, carried and re-shown items, so a pool that
-  cannot keep up with refreshes is visible.
+A list (N = 30, head H = 5) is built in this order of precedence:
 
-Two consecutive lists on one device share 20-40% of their items, as long as the pool holds
-enough never-shown videos.
+1. **Hard constraints**: no video opened in the last 90 days; only valid items; channel caps;
+   no video in more than three consecutive lists on one device.
+2. **Head**: positions 1 to H are always videos never served to the user before on any device,
+   so the pinned section and the top of the browse view are new on every refresh.
+   `SERENDIP_HEAD_SIZE` should match the Home setting.
+3. **Carry-over**: from the previous list served on the same device, up to 30% of the returned
+   list (configurable within 20-40%; the ceiling is enforced against the actual list size),
+   drawn by weight from items not opened since, placed after the head and never at their
+   previous position. The lower bound holds only when enough previous items are still
+   eligible.
+4. **New items** fill the rest: never served to the user on any device. The 40% subscriptions
+   to 60% discoveries split is a soft target; when one side runs out, the other fills.
+5. **Re-shown items**, served before but not in the previous list, fill in only when new items
+   run out, the longest-ago first. Items of the previous list come back only through the
+   carry-over allowance. If that is still not enough, the list is shorter.
+6. **Repeat**: a request from the same device within 15 s of a list gets that list again,
+   minus anything opened since. It records nothing new and does not extend the 15 s.
+
+- **Exposure ledger.** "Served" is tracked per user and video in a durable table (section 9),
+  independent of the 30-day detailed impressions and of pool expiry, so a rediscovered video
+  never counts as new again.
+- A video found both among subscription uploads and in a related list counts as `subs`.
+- Selection, the ledger update and the stored list happen in one SQLite transaction that takes
+  the write lock before reading eligibility (`BEGIN IMMEDIATE`), so requests from the iPhone
+  and the Apple TV at the same moment get disjoint new items. Items are validated before the
+  transaction commits.
+- **Devices**: "same device" uses the User-Agent mapping (section 4); without it both devices
+  share one refresh state. New items never repeat across devices; in a shortage, re-shown items
+  can.
+- **Capacity**: each refresh uses about 21 never-served videos at N = 30. Supply is the
+  subscriptions feed (up to 1000 recent uploads) plus about 19 related items per follow-up (up
+  to 20 follow-ups a day), before deduplication and filters. `/status` reports how many
+  never-served eligible videos remain, and `serendip_list_items_total{kind}` counts new,
+  carried and re-shown items.
+
+Two consecutive lists on one device share at most 40% of their items, and their heads none.
 
 ## 7. Upstream budget
 
@@ -272,26 +307,35 @@ subscribed channel per run (66 channels). YouTube is reached from a hosted IP
 (a Warsaw hosting network), which is flagged sooner than a residential one. The Q5 measurement
 (`docs/SPIKE.md`) is an initial observation of tolerance, not proof of a safe rate.
 
-By default serendip makes no YouTube requests of its own. Two kinds of call can reach
-YouTube, both budgeted and both behind one breaker:
+After this, the server was bot-checked (`docs/SPIKE.md`): no rate from this IP is known to be
+safe.
 
-- **Follow-ups** through the server (section 5.1): at most 2 per hour and 20 per day, one at a
-  time, ±30% jitter, persisted so restarts do not reset it, each counted as a full extraction.
-  Response time and `extractionMethod` are recorded so cache hits and misses are visible.
-- **`/next`** (`deep`): 0 per hour by default. When enabled, one at a time, fixed client
-  version (no homepage fetches), no cookies, no automatic retries.
-- **Feed posts** (`POST /api/v1/feed`) read the server's database; at most one every 6 hours,
-  only for the user's own subscriptions.
-- **Breaker**: a follow-up answered 404 with sign-in or bot text, or 5xx; for `/next` an HTTP 429
-  or 403, sign-in or bot text, or a response without `contents`. Any of them stops all
-  follow-ups and `/next` calls until Jan re-enables them (`serendip breaker reset`). It logs at
-  ERROR, sets `serendip_breaker_open 1`, and shows the reason in `/status`. Serving continues
-  from the pool. The `UNPLAYABLE`/`LOGIN_REQUIRED` states the server logs for anonymous
-  `/player` are normal and not a trigger.
-- **Metrics** (Prometheus, scraped through a ServiceMonitor by the cluster's
-  kube-prometheus-stack): `serendip_jobs_total{job,outcome}`,
-  `serendip_server_requests_total{endpoint,status}` for calls to Yattee Server, and
-  `serendip_upstream_attempts_total{kind,outcome}` for requests that reach YouTube.
+serendip makes no YouTube requests of its own and none at request time. It can cause YouTube
+work inside the server in two ways, both behind one breaker:
+
+- **Follow-ups** (section 5.1): extraction jobs, at most 2 in any rolling hour and 20 in any
+  rolling day, at least 10 minutes apart, one at a time; jitter never overrides a limit. This
+  is a provisional ceiling, not a measured safe rate, and it is not raised to fix a thin pool.
+  One job can mean several YouTube requests inside the server.
+- **Feed posts**: at most one every 6 hours; a post can queue fetches of uncached channels.
+
+**Breaker**, persistent across restarts, reset only by `serendip breaker reset`
+(`serendip breaker trip` stops everything by hand):
+
+- trips on sign-in or bot text in any response, on any 5xx, malformed response, transport
+  error or timeout, and on 401, 403 or 429 from the server (logged as an operational stop, not
+  as a bot-check);
+- a plain 404 (video unavailable) marks that seed failed without tripping it;
+- while open: no follow-ups and no feed posts; serving continues from the pool. It logs at
+  ERROR, sets `serendip_breaker_open 1` and shows the reason in `/status`.
+
+The server hides many upstream problems behind its fallbacks and still answers 200; those are
+not observable from serendip, and the server's log is the place to see them.
+
+**Metrics** (scraped through the ServiceMonitor): `serendip_jobs_total{job,outcome}`,
+`serendip_server_requests_total{endpoint,status}`, follow-up latency and the response's
+`extractionMethod` as recorded facts (whether a follow-up hit the cache is not measured),
+`serendip_breaker_open`, and `serendip_list_items_total{kind}`.
 
 ## 8. AI decision
 
@@ -316,14 +360,15 @@ the heuristic as fallback.
 | `subscriptions` | user_id, channel_id, name, first_seen, last_seen_by_user |
 | `opens` | user_id, video_id, channel_id, last_open_utc, count (unique user_id + video_id) |
 | `videos` | video_id, title, author, author_id, length_s, published_est, view_count, thumbnails (JSON), found_at |
-| `pool` | user_id, video_id, source (`subs`/`related`/`adjacent`), seed_video_id, found_at, expires_at (unique user_id + video_id + source) |
+| `pool` | user_id, video_id, source (`subs`/`related`/`adjacent`), seed_video_id (first seed only), found_at, expires_at (unique user_id + video_id) |
 | `lists` | id, user_id, device, ts_utc, seed, algorithm_version, size |
-| `impressions` | list_id, user_id, video_id, ts_utc, device, position, kind (`new`/`carried`/`reshown`), times_carried |
-| `upstream_attempts` | ts_utc, kind, target, status, seconds, outcome |
+| `impressions` | list_id, user_id, video_id, ts_utc, device, position, kind (`new`/`carried`/`reshown`) |
+| `exposures` | user_id, video_id, first_served, last_served, times_served (unique user_id + video_id; kept as long as the user exists) |
+| `followups` | video_id, reserved_at, sent_at, finished_at, status, seconds, extraction_method, outcome |
 | `budget`, `breaker` | single-row state |
 
 Indexes cover the exclusion queries (opens by user and time, impressions by user and time).
-Retention: events 180 days, impressions and upstream attempts 30 days. Migrations run in an
+Retention: events 180 days, impressions and follow-ups 30 days, exposures kept. Migrations run in an
 init container as in tuiter. Backups are Kopiur snapshots of the PVC; serendip checkpoints the
 WAL every few minutes so a snapshot is consistent enough to restore.
 
@@ -333,54 +378,58 @@ WAL every few minutes so a snapshot is consistent enough to restore.
 |---|---|---|
 | serendip down | Popular fails; the pinned section keeps its cached list, the browse view shows an error | nothing else is affected |
 | Pool empty or worker failing | | serve from the stored pool with the same filters; if nothing qualifies, return an empty list. Never a request-time call to YouTube or to the server's `/popular` |
-| Bot check | `/next` stops | breaker, manual re-enable; pool and `subs` keep serving |
+| Bot check or server error | follow-ups and feed posts stop | breaker, manual reset; the stored pool keeps serving |
 | Yattee Server down | `subs` cannot refresh | the stored pool keeps serving; auth is local, so `/popular` still answers |
-| `/next` layout change | parser yields nothing | breaker on missing `contents`; metric on empty lists; re-sync the vendored parser |
+| Follow-ups return no related videos | discoveries dry up | `/status` and metrics show it; lists fall back to subscriptions |
 | Mirror lost or delayed | an open is missed | accepted (best effort) |
 | Bad item | the app rejects the whole list | validation drops the item before sending |
 
 ## 11. Test plan
 
-- **Mirror spike (stage a, before deploy)**: local Envoy (OrbStack) with a fake primary and
-  serendip as mirror: `POST` body arrives intact, path and query unchanged, `Host` as sent,
-  primary latency unaffected with serendip slow, stopped, or returning errors.
-- **Unit**: event extraction from recorded requests (from real server log lines); subscription
-  union and ageing with partial and chunked posts; local allowlist (known, unknown and
-  malformed credentials, and no outgoing request in any case); redaction; budget and breaker
-  transitions; vendored parser
-  against upstream's tests plus recorded real `/next` responses; response validation.
+- **Mirror spike (stage a, done)**: local Envoy with a fake primary and serendip as mirror;
+  results in `spikes/mirror/RESULTS.md`.
+- **Unit**: event extraction from recorded requests; subscription union and ageing; local
+  allowlist with no outgoing request; redaction; response validation.
 - **Selection**: deterministic under a seed and snapshot; never returns opened (90 days)
-  items; caps and the subscription share hold during the draw; shortage returns a shorter list;
-  the same device at 08:00 and at 21:00 gets a different length mix.
-- **Refresh**: consecutive lists on one device overlap by 20-40% when the previous list has
-  enough unopened items; carried items are never opened ones, get new positions, and no item
-  appears in more than three consecutive lists; new items are never-shown ones while the pool
-  has them, then the least recently shown; a repeat within 15 s returns the same list; lists on
-  two devices do not share new items.
-- **Integration**: FastAPI test client with a fake Yattee Server and fake InnerTube (respx):
-  mirrored events → worker → pool → `/popular`, asserting the number of upstream attempts.
-- **Live (Jan, after each deploy)**: mirrors arrive (stage a); lists on iPhone and Apple TV
-  (stage b); the server log shows no change in upstream patterns beyond serendip's own `/next`
-  calls.
+  items; caps hold during the draw; the subscriptions share is a soft target; daypart weighting
+  shifts the length mix across many fixed seeds (statistically, not per pair).
+- **Refresh matrix**: abundant, scarce and empty pools; short previous and current lists; all
+  previous items opened; items at their carry limit; videos in both pools; channel caps that
+  prevent the nominal mix. In every case: the head is never-served items; carried items stay
+  within 40% of the returned list, are never opened, never keep their position, and no video
+  appears in more than three consecutive lists; re-shown items never bypass these limits.
+- **History**: prune impressions, expire and rediscover candidates, restart; a previously
+  served video is never new again.
+- **Concurrency**: simultaneous requests on one device and on two devices; disjoint new items;
+  rollback and cancellation leave no phantom impressions; a validation failure records nothing.
+- **Repeat**: boundaries around 15 s, an open in between, a fixed (not sliding) window, devices
+  without a User-Agent mapping, no extra work.
+- **Follow-ups** against a fake server: warm original, failed original, still extracting,
+  restart, duplicate opens, the 120 s drop, rolling budgets, a crash after the reservation.
+- **Breaker**: bot text in a 404 and in a 200, plain 404, empty or missing related list,
+  malformed JSON, 401/403/429, 5xx, timeout; the breaker persists, needs a manual reset, and no
+  request is made while it is open.
+- **Integration**: FastAPI test client with a fake Yattee Server (respx): mirrored events →
+  follow-ups and feed → pool → `/popular`, asserting no request-time HTTP calls and the number
+  of server requests.
+- **Live (Jan, after deploy)**: Home → browse → Home on both devices; two refreshes a few
+  minutes apart; the server log shows no upstream pattern beyond the app's own and serendip's
+  follow-ups.
 
 ## 12. Stages
 
-- **(a) Observe**: service skeleton, both ports, mirror ingestion, auth check, SQLite,
-  subscriptions union, opens, metrics, `/status`, the local mirror spike. **No outgoing calls
-  at all and no change to Popular.** Home-ops branch: serendip release, ExternalSecret, PVC,
-  ServiceMonitor, and the mirror rules on the yattee-server route.
-- **(b) Discover**: `/next` client with budget and breaker, pool builder, selection, `/popular`
-  route to serendip.
-- **(c) Tune**, only on evidence from use: weights, device-specific priors, search-based
-  exploration, channel uploads for adjacent channels, AI.
+- **(a) Observe** (live since 2026-10-12): mirror ingestion, local credential allowlist,
+  SQLite, subscriptions union, opens, metrics, `/status`. No outgoing calls.
+- **(b) Discover**: follow-ups with budget and breaker, feed ingestion, pool, selection with
+  the refresh rule, `/popular`, the `serendip` service user. Home-ops: the `/popular` route to
+  serendip and the service user's credentials in the ExternalSecret.
+- **(c) Later**, only on evidence from use: anonymous `/next` (`SERENDIP_RELATED_SOURCE=next`),
+  second-hop related lists, co-occurrence ranking, search-based exploration, device-specific
+  priors, AI.
 
 ## 13. Open items
 
-- Q5 (`docs/SPIKE.md`): 42 of 42 heavy lookups were clean, but the server was bot-checked
-  2 h 20 min later at a much lower rate, and it now uses a throwaway account's cookies. Stage
-  (b) therefore takes related videos from follow-ups (section 5.1) and leaves `/next` off.
-- Whether a current `/next` response offers a continuation for more related items (upstream
-  never asks for one).
-- Jan: custom User-Agent strings per device (optional); whether Shorts stay out with the
-  180-second cut-off; list size 30; create the `serendip` user in Yattee Server's admin UI and
-  a 1Password field for it before stage (a) deploys.
+- Whether a current `/next` response offers a continuation for more related items (stage c).
+- Jan: custom User-Agent strings per device (optional, needed for per-device refresh state);
+  whether Shorts stay out with the 180-second cut-off; list size 30; head size matching the
+  Home setting (5 by default).
