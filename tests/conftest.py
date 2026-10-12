@@ -1,22 +1,17 @@
 import asyncio
 import base64
 import hashlib
-import sys
 from pathlib import Path
 
 import pytest
 
-from serendip import consumer
+from serendip import consumer, migrate
 from serendip.auth import Authenticator
 from serendip.config import Settings
 from serendip.db import Database
 from serendip.state import State
 
 ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT / "migrations"))
-
-import migrate  # noqa: E402
-
 UA = "Mozilla/5.0 (Macintosh) Safari/605.1.15 serendip-tv"
 
 

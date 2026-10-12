@@ -1,19 +1,19 @@
-"""Applies the numbered SQL migrations in this directory to the SQLite database.
+"""Applies the numbered SQL migrations in serendip/migrations/ to the SQLite database.
 
-Run by the init container (python migrations/migrate.py) and by `python -m serendip migrate`.
-Safe to run again: applied versions are recorded in schema_version and skipped.
+Run by the init container as `python -m serendip migrate`. The SQL ships inside the package,
+so it works from an installed wheel. Safe to run again: applied versions are recorded in
+schema_version and skipped.
 """
 
-import os
 import re
 import sqlite3
-import sys
-from pathlib import Path
+from importlib.resources import files
+from importlib.resources.abc import Traversable
 
-HERE = Path(__file__).parent
+MIGRATIONS = files("serendip") / "migrations"
 
 
-def migrate(db_path: str, directory: Path = HERE) -> list[str]:
+def migrate(db_path: str, directory: Traversable = MIGRATIONS) -> list[str]:
     """Applies the migrations not yet recorded and returns the names it applied."""
     conn = sqlite3.connect(db_path)
     applied_now: list[str] = []
@@ -26,7 +26,11 @@ def migrate(db_path: str, directory: Path = HERE) -> list[str]:
         )
         applied = {r[0] for r in conn.execute("select version from schema_version")}
 
-        for path in sorted(directory.glob("[0-9]*.sql")):
+        paths = sorted(
+            (p for p in directory.iterdir() if re.match(r"\d+.*\.sql$", p.name)),
+            key=lambda p: p.name,
+        )
+        for path in paths:
             version = int(re.match(r"\d+", path.name).group())
             if version in applied:
                 continue
@@ -40,16 +44,3 @@ def migrate(db_path: str, directory: Path = HERE) -> list[str]:
     finally:
         conn.close()
     return applied_now
-
-
-def main() -> int:
-    db_path = os.environ.get("SERENDIP_DB_PATH", "/data/serendip.db")
-    applied = migrate(db_path)
-    for name in applied:
-        print(f"applied {name}")
-    print(f"db at {db_path}, {len(applied)} migration(s) applied")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

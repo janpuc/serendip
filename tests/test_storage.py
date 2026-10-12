@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 import structlog
-from conftest import ROOT, channel_id, make_settings, migrate, sha256_hex
+from conftest import channel_id, make_settings, sha256_hex
 
-from serendip import cli, logs
+from serendip import cli, logs, migrate
 from serendip.db import Database, stamp
 
 
@@ -66,7 +66,6 @@ def test_cli_migrate(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     assert cli.main(["migrate"]) == 0
     assert "applied 001_observe.sql" in capsys.readouterr().out
-    assert cli.MIGRATE_PY == ROOT / "migrations" / "migrate.py"
 
 
 def test_device_map():

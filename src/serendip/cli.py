@@ -4,22 +4,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib.util
-from pathlib import Path
 
 from . import logs
 from .config import Settings
 from .db import Database
-
-MIGRATE_PY = Path(__file__).resolve().parents[2] / "migrations" / "migrate.py"
+from .migrate import migrate
 
 
 def _migrate(settings: Settings) -> int:
-    # migrations/ sits beside the package, not inside it, so the init container can run it alone.
-    spec = importlib.util.spec_from_file_location("serendip_migrate", MIGRATE_PY)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    for name in module.migrate(settings.db_path):
+    for name in migrate(settings.db_path):
         print(f"applied {name}")
     return 0
 

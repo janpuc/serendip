@@ -1,6 +1,6 @@
 """SQLite. Single writer, single connection, WAL.
 
-All SQL lives here. The schema comes from migrations/, which the init container applies.
+All SQL lives here. The schema comes from serendip/migrations/, which the init container applies.
 """
 
 from __future__ import annotations
